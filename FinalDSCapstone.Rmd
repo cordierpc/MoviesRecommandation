@@ -1,0 +1,1178 @@
+
+
+---
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+<style>
+
+h1 {
+  font-size: 14px;
+  font-weight: bold;
+  margin-top: 40px;
+}
+
+p {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+Li {
+  font-size: 13px;
+  margin-bottom: 3px;
+}
+
+</style>
+
+<html><body style="text-align:justify">
+
+<p>Dear reader,</p>
+<p>Thank you for taking time to review this project. The target of this work is to design an algorithm that will forecast the rating given by a list of users to alist of movies stored in the verification set provided by edx, and this using an algorithm trained on a training set, of course without using the verification set before the very last step. The performance of the algorithm is measured by computing the mean difference between the forecast and the real rating, called RMSE and computed with the formula:</p>
+
+<p style="text-align:center">$RMSE = \sqrt{\sum{(R - Y)}^2}$</p>
+
+<p>Where R is the actual rating and Y the rating computed by the algorithm.</p>
+<p>It is commonly known that to perform such a forecast, the most efficient way is to use the matrix factorization method, directly available in some R packages. However, I personally consider that the target of this project is not to get the lowest RMSE and earn the Netflix price, but to learn R, follow my own ideas, and, at the end, get an home-made and unique algorithm that will lower the RMSE enough to get a good grade (< 0.86 as far as I remember), even if the resulting RMSE would likely have been lower by using some ready-to-use R packages.</p>
+
+<p>Here is how the project is organized:</p>
+<p><ul><li>Step 0: Download and split of the movie data frame using the code chunk provided by edx</li>
+<li>Step 1: Data exploration, discovery of the edx set</li>
+<li>Step 2: Split of the edx set into partitions for training and test</li>
+<li>Step 3: Design of the algorithm and its different terms</li>
+<li>Step 4: Test of the resulting algorithm on the test set from set 2, measure of the RMSE</li>
+<li>Step 5: Regularization step for the different terms using the test set of step 2, measure of the resulting RMSE</li>
+<li>Step 6: Training of the algorithm with the full edx set</li>
+<li>Step 7: Application of the algorithm from step 6 and regularization factors of step 5 on the validation set provided by edx.</li>
+<li>Step 8: Conclusion and perspectives</li></ul></p>
+
+<h1>Step 0: download movies.dat and split it into edx and validation set using the code chunk provided by edx.</h1>
+
+<p>This first part is a simple copy / paste of the code provided by edx to get the training set (dataframe called edx) and the test set (dataframe called validation):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+<h1>Step 1: Data exploration, discovery of the edx set</h1>
+
+
+<p>First, let's browse a bit the data. Each entry is made of the following attributes: </p>
+
+```{r, warning=FALSE, message=FALSE}
+
+head(edx)
+
+
+```
+
+<p>Three remarks so far:</p>
+<p><ul><Li>The timestamp as an integer may not be very convenient, a date would likely be more meaningful and could give more information, such as the year or the period of the year. For example we can imagine that Christmas movies get better rating around the Christmas period, or that the ratings fluctuate with people's seasonal mood fluctuations;</Li>
+<Li>We have no metadata of the movies (actors, producer, etc.) to make correlations, but the title includes the release year between bracket. This may be a useful information, it will have to be extracted and stored as a new column;</Li>
+<Li>The genre of the movie can be a combinations of multiple genres, the number of possible combinations will likely be huge.</Li></ul></p>
+
+<p><br/>Now, let's have a look to the columns individually.<br/></p>
+
+<p><b><br/>UserId:</b></p>
+
+<p>There are `r length(unique(edx$userId))` different users in the training set.</p>
+
+
+<p>Let's see how many ratings they have:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+User <- edx %>% select(userId, rating) %>% 
+                group_by(userId) %>% 
+                summarize(n = n(), avgRating = mean(rating)) %>% 
+                arrange(desc(n))
+
+User %>% ggplot(aes(n)) + 
+         geom_histogram(color = "blue", fill = "white", size = 1) + 
+         scale_x_log10() + 
+         theme_bw() + 
+         labs(x = "Nr of ratings (log scale)", y = "Nr of users", title = "Repartition of the number of ratings per user")
+
+```
+
+<p>We can see that very few users have less than 20 ratings, most of the users have rated at least 20, some of them up to a couple of thousand movies. This is a good news because the more rating a user have, the most accurate a machine-learning algorithm will be.</p>
+
+<p>Let's now have a look to the dispatch of average rating per user:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+User %>% ggplot(aes(avgRating)) + 
+         geom_histogram(bins = 50, color = "blue", fill = "white", size = 1) + 
+         theme_bw() + 
+         labs(x = "Average rating", y = "Nr of users", title = "Repartition of the users average rating")
+
+```
+
+<p>The average ratings appear to be normally distributed, with a maximum around 3.7.</p>
+
+
+
+<p><b><br/>movieId:</b></p>
+
+<p>There are `r length(unique(edx$movieId))` different movies in the edx set. Let's see how many ratings they have:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+Mov <- edx %>% 
+       select(movieId, rating) %>% 
+       group_by(movieId) %>% 
+       summarize(n = n(), avgRating = mean(rating)) %>% 
+       arrange(desc(n))
+
+Mov %>% ggplot(aes(n)) + 
+        geom_histogram(bins = 20, color = "blue", fill = "white", size = 1) + 
+        scale_x_log10() + 
+        theme_bw() + 
+        labs(x = "Nr of ratings (log scale)", y = "Nr of movies", title = "Repartition of the number of ratings per movie")
+
+```
+
+<p>The number of ratings per movie is more widely distributed. The highest range seems to be between 30 and 150 ratings but a non-negligeable amount of movies have a low number of rating (< 10).</p> 
+
+<p>Let's now have a look to the dispatch of the average rating per movie:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+Mov %>% ggplot(aes(avgRating)) + 
+        geom_histogram(bins = 50, color = "blue", fill = "white", size = 1) + 
+        theme_bw() + 
+        labs(x = "Average rating", y = "Nr of movies", title = "Repartition of the movies average rating")
+
+```
+
+<p>The average rating of movies is close to a normal distribution, but the bell curve is a bit flattened, average ratings are quite spread across the range 1 to 4.5.</p>
+
+
+<p><b><br/>timestamp:</b></p>
+
+<p>The two first following packages will be usefull to convert the timestamp to a date, the third one is used for graph scales:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Loading libraries
+
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(anytime)) install.packages("anytime", repos = "http://cran.us.r-project.org")
+if(!require(scales)) install.packages("scales", repos = "http://cran.us.r-project.org")
+
+library(lubridate)
+library(anytime)
+library(scales)
+
+options(digits = 5)
+
+```
+
+<p>Ratings start in `r months(anytime(min(edx$timestamp)))` `r year(anytime(min(edx$timestamp)))` and end in `r months(anytime(max(edx$timestamp)))` `r year(anytime(max(edx$timestamp)))`. Let's now have a look how the number of ratings are dispatched through time:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+RatingThroughYear <- edx %>% mutate(TimeFactor = year(anytime(timestamp))) %>% 
+                             group_by(TimeFactor) %>% 
+                             summarise(n = n(), avgRating = mean(rating)) %>%
+                             mutate(var = "Year")
+
+RatingThroughMonth <- edx %>% mutate(TimeFactor = month(anytime(timestamp))) %>% 
+                              group_by(TimeFactor) %>% 
+                              summarise(n = n(), avgRating = mean(rating)) %>% 
+                              mutate(var = "Month")
+
+RatingThroughTime <- rbind(RatingThroughYear, RatingThroughMonth)
+
+RatingThroughTime %>% ggplot(aes(TimeFactor, n)) + 
+                      geom_line(color = "blue", size = 1) + 
+                      theme_bw() + 
+                      scale_x_continuous(breaks = pretty_breaks()) + 
+                      xlab("Time (month on the left graph / year on the right graph)") + 
+                      facet_grid(cols = vars(var), scales = "free") + 
+                      labs(x = "rating month (left graph) / rating year (right graph)", y = "Nr of ratings", title = "Fluctuation of the number of ratings across time")
+
+```
+
+<p>The two graphs here show:</p>
+<p><ul><Li>The fluctuation of the number of ratings across the period 1995-2009 (right graph);</Li> 
+<Li>The fluctuation of ratings across the month of the year (left graph).</Li></ul></p> 
+<p>We see that even exclusion done of the two extremes (1995 and 2009), we have important fluctuations over the period of ratings we have. However across seasons of the year, we notice a small drop in summer and a small peak in autumn (North hemispher) but seasonal fluctuations appear to moderate.</p>
+
+
+<p><br/>Now let's have a look to the average ratings across time:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+RatingThroughTime %>% ggplot(aes(TimeFactor, avgRating)) + 
+                      geom_line(color = "blue", size = 1) + 
+                      theme_bw() + 
+                      xlab("Time (month on the left graph / year on the right graph)") + 
+                      facet_grid(cols = vars(var), scales = "free") + 
+                      labs(x = "rating month (left graph) / rating year (right graph)", y = "Average rating", title = "Fluctuation of the average rating across time")
+
+```
+
+<p>Analog as before, we notice a fluctuation of the average rating across the period 1995 - 2009. Exclusion done of 1995 (not enough ratings this year to be relevant), we have a peak in 1999 and a drop in 2004, with an amplitude of roughly 0.2. Average rating fluctuation across the seasons (left graph) appear to be smoother. We notice a small peak in October but nothing really relevant.</p>
+<p>This small analysis shows that the year should be a relevant factor to take into account, but that the rating month can be ignored.</p>
+
+
+<p><b><br/>genres:</b></p>
+
+<p>Movies in the edx set are dispatched in `r length(unique(edx$genres))` different genres. Let's see which genres are the most and the least used:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+MovperGenre <- edx %>% select(genres, movieId) 
+
+MovperGenre <- unique(MovperGenre) %>% 
+               group_by(genres) %>% 
+               summarize(nMovies = n())
+
+MovperGenre %>% arrange(desc(nMovies)) %>% top_n(10)
+MovperGenre %>% arrange(nMovies) %>% top_n(-10)
+
+MovperGenre %>% ggplot(aes(nMovies)) + 
+                geom_histogram(bins = 15, color = "blue", fill = "white", size = 1) + 
+                scale_x_log10() + 
+                theme_bw() + 
+                labs(x = "Number of movies (log scale)", y = "Nr of genres", title = "Dispatch of the number of movies per genres")
+
+```
+
+<p>It is not a surprise to see that genres made of a combination of 5, 6 or sometimes even 7 of the few differents individual genres, become so specific that they are assigned to a single movie. We still fortunately find some genres more widely used.</p>
+
+<p>Now let's have a look to the average rating per genres, the best rated and least rated:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+AvgRperGenre <- edx %>% select(genres, rating) %>% 
+                        group_by(genres) %>% 
+                        summarize(avgRating = mean(rating))
+
+AvgRperGenre %>% arrange(desc(avgRating)) %>% top_n(10)
+AvgRperGenre %>% arrange(avgRating) %>% top_n(-10)
+
+AvgRperGenre %>% ggplot(aes(avgRating)) + 
+                 geom_histogram(bins = 50, color = "blue", fill = "white", size = 1) + 
+                 scale_x_log10() + 
+                 theme_bw() + 
+                 labs(x = "Average rating", y = "Nr of genres", title = "Dispatch of the average ratings per genres")
+
+```
+
+<p>Average rating of the different genres appear to be a normal distribution with a peak around 3.5 and values spread between 2 and 4.5. This diversity of average rating across genres may be a useful information to exploit for genres assigned to different movies.</p>
+
+
+<p><b><br/>title:</b></p>
+
+<p>The title itself is unlikely an information usable in the algorithm, but the production year between braket at the end of each title can be a useful information. We extract it, store it in a new column and group the movies by production decade (we group because some years would not have enough movies to be relevant):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+MovieDecades <- edx %>% mutate(movieYear = substring(title, nchar(title)-4, nchar(title)-1)) %>%
+                        mutate(movieDecade = 10*floor(as.numeric(movieYear)/10)) %>% select(movieDecade, movieId)
+
+MovieDecades <- unique(MovieDecades)
+
+MovieDecades %>% ggplot(aes(movieDecade)) + 
+                 geom_histogram(bins = 10, color = "blue", fill = "white", size = 1) + 
+                 theme_bw() + 
+                 scale_x_continuous(breaks = pretty_breaks()) + 
+                 labs(x = "Decade", y = "Number of movies produced", title = "Dispatch of movies per production decade")
+
+```
+
+<p>We have movies produced across the full century, the number increases with time, not surprisingly.</p>
+
+<p>Let's have a look to the average rating per production decade:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+MovieDecades <- edx %>% mutate(movieYear = substring(title, nchar(title)-4, nchar(title)-1)) %>%
+                        mutate(movieDecade = 10*floor(as.numeric(movieYear)/10)) %>% 
+                        group_by(movieDecade) %>% 
+                        summarize(n = n(), avgRating = mean(rating))
+
+MovieDecades %>% ggplot(aes(movieDecade, avgRating)) + 
+                 geom_line(color = "blue", size = 1) + 
+                 theme_bw() + 
+                 scale_x_continuous(breaks = pretty_breaks()) + 
+                 labs(x = "Movie decade", y = "Average rating", title = "Average rating of movies per production decade")
+
+```
+
+<p>We see that there are important fluctuations of average ratings between recent and old movies with a highest average rating for 40's classics, and a lowest for movies of the 90's. Amplitude between those two extremes is roughly 0.5. A deeper analysis would likely show important trends for individual users, some prefering old classics and some prefering more recent movies.</p>
+
+<p>We conclude after this small analysis that the model should take into account: the user, the movie, the rating year, the genre and the movie realization decade. The rating month can be excluded from the algorithm, we have seen that it doesn't seems to be a relevant factor.</p>
+
+<p>Now, serious things can start, we can design the algorithm.</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# A bit of cleanup first.
+
+rm(MovieDecades, MovperGenre, AvgRperGenre, RatingThroughTime, RatingThroughYear, RatingThroughMonth, Mov, User)
+
+```
+
+<h1>Step 2: Split of the edx set into partitions for training and test</h1>
+
+<p>The edx dataframe is split in two sets, 90% going to a training set, the 10 remaining percent giving the test set. The training set will be called TrainingSet, the test set will be called TestSet:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  GenerateSubSet <- function(DF, n) {
+    
+    set.seed(2020, sample.kind="Rounding")
+    DFSample <- sample(nrow(DF), size = n, replace = FALSE)
+    DF[DFSample,]
+  }
+  
+  
+  SubSet <- GenerateSubSet(edx, nrow(edx))
+  indexes <- createDataPartition(y = SubSet$userId, times = 1, p = 0.1, list = FALSE)
+  
+  TrainingSet <- SubSet[-indexes,]
+  TestSet <- SubSet[indexes,]
+  
+  rm(SubSet, indexes)
+
+```
+
+<h1>Step 3: Design of the algorithm and its different terms</h1>
+
+<p>The principle of the algorithm is to compute an extrapolated rating (Y_hat) by addition of different parameters computed step by step. The equation of the algorithm will be:</p> 
+
+<p style="text-align:center">$Y = \sum_{i=1}^{n} Ti$</p>
+
+<p>Where Ti is the algorithm term number i</p>
+
+<p>Each term is computed by the difference between the average rating for one / several factor(s) (eg. the average rating for a user a particular year), and the average Y_hat for the same factors using the algorithm of the previous step. A new Y_hat is computed by adding this new term to the previous, and so on for all terms. Also at each step we isolate the number of values for each line so that we can later on use the regularization methods.</p>
+<p>Each Step is made of a function so that it can be reused after on the full edx set at the end.</p>
+<p>Before starting, we extract from the timestamp the rating year, and the movie realization year from the title. Those two values will be useful later.</p>
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Function that will extract the year from the timestamp and the decade of the movie production and add to the data set .
+
+ExtractMovieYearAndRatingYear <- function(DF) {
+  
+  DF %>% mutate(ratingYear = year(anytime(timestamp))) %>% 
+         mutate(movieYear = substring(title, nchar(title)-4, nchar(title)-1)) %>% 
+         mutate(movieDecade = 10*floor(as.numeric(movieYear)/10))
+  
+}
+
+  TrainingSet <- ExtractMovieYearAndRatingYear(TrainingSet)
+
+```  
+  
+<p><b><br/>Algorithm term 1:</b> As first element, the average value for all movies and all users is computed.</p>
+  
+```{r, warning=FALSE, message=FALSE}  
+
+# Function that extract the average movie rating of all movies and all users.
+
+GetTheBasis <- function(DF) {
+  
+  AvgOverall <- DF %>% summarize(avgOverall = mean(rating)) %>% pull(avgOverall)  
+  
+}
+
+
+# Compute for the Training Set the average rating for all movies and all users.
+
+  AvgOverall <- GetTheBasis(TrainingSet)
+   
+  TrainingSet <- TrainingSet %>% mutate(Y_hat = AvgOverall)
+
+```
+
+<p><br/>Considering that some movies are better than others, the algorithm should include a term depending of each individual movie.</p>
+<p><b>Algorithm term 2:</b> The average rating of each movie is computed and the difference between the previous Y_hat and the average movie rating makes the second term.</p>
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Function that get the number of ratings for each movie, the average rating for each movie for all users and the difference between this movie and the average rating over all movies.
+
+  GetTheMovieAverageRating <- function(DF) {
+  
+  AvgOverall <- GetTheBasis(DF)
+  
+  DF %>% group_by(movieId) %>% 
+         summarize(avgRatingMovie = mean(rating), nMovie = n()) %>% 
+         mutate(DiffRatingMovie = avgRatingMovie - AvgOverall) %>%
+         select(movieId, DiffRatingMovie, nMovie)
+  
+}
+
+
+# Compute for the Training Set the average rating of each movie for all users.
+  
+  Mavg <- GetTheMovieAverageRating(TrainingSet)
+  
+  TrainingSet <- TrainingSet %>% 
+                  left_join(Mavg, by = "movieId") %>% 
+                  mutate(DiffRatingMovie = ifelse(!is.na(DiffRatingMovie), DiffRatingMovie, 0), nMovie = ifelse(!is.na(nMovie), nMovie, 0))
+  
+  TrainingSet <- TrainingSet %>% mutate(Y_hat = AvgOverall + DiffRatingMovie)
+
+```
+
+<p><br/>Considering that some users tend to give better rating than others (either because they are less critic or because they tend to chose more carefully what they watch the Friday night), the algorithm should include a term depending of each individual user.</p>
+<p><b>Algorithm term 3:</b> The average rating of each user is computed and the difference between the previous Y_hat and the average user rating makes the third term.</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Function that computes the number of rating for each user, his averge rating across all movies and the difference between his average rating and the overall rating average.
+
+GetTheUserAverageRating <- function(DF) {
+  
+  AvgOverall <- GetTheBasis(DF)
+  
+  DF %>% group_by(userId) %>% 
+         summarize(avgRatingUser = mean(rating), avgY_hat = mean(Y_hat), nUser = n()) %>% 
+         mutate(DiffRatingUser = avgRatingUser - avgY_hat) %>%
+         select(userId, DiffRatingUser, nUser)
+  
+}
+
+
+# Compute for the Training Set the average rating of each user for all movies. 
+  
+  Uavg <- GetTheUserAverageRating(TrainingSet)
+    
+  TrainingSet <- TrainingSet %>% 
+                  left_join(Uavg, by = "userId") %>% 
+                  mutate(DiffRatingUser = ifelse(!is.na(DiffRatingUser), DiffRatingUser, 0), nUser = ifelse(!is.na(nUser), nUser, 0))
+  
+  TrainingSet <- TrainingSet %>% mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser)
+
+```
+
+<p><br/>Considering that some users will prefer comedies and some other will prefer action movies, we should include a term depending of the affinity for each genre for each user.</p>
+<p><b>Algorithm term 4:</b> The average rating of each couple genre / user is computed and the difference between the previous Y_hat and the average movie rating makes the fourth term.</p>
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Function that computes the number of rating for each user for each genre, his averge rating across all movies of this genre and the difference between this average rating and the rating coming from the previous step.
+
+GetTheGenreUserAverageRating <- function(DF) {
+  
+  DF %>% group_by(genres, userId) %>% 
+         summarize(avgGenresUser = mean(rating), avgY_hat = mean(Y_hat), nGenresUser = n()) %>% 
+         mutate(DiffGenresUser = avgGenresUser - avgY_hat) %>%
+         select(genres, userId, DiffGenresUser, nGenresUser)
+  
+}
+
+
+# Compute for the Training Set the average rating of each genre for each user.
+  
+  Gavg <- GetTheGenreUserAverageRating(TrainingSet)
+  
+  TrainingSet <- TrainingSet %>% 
+                  left_join(Gavg, by = c("userId", "genres")) %>% 
+                  mutate(DiffGenresUser = ifelse(!is.na(DiffGenresUser), DiffGenresUser, 0), nGenresUser = ifelse(!is.na(nGenresUser), nGenresUser, 0))
+  
+  TrainingSet <- TrainingSet %>% 
+                  mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser)
+  
+```
+
+<p><br/>Considering that users are humans with ups and downs in their life, good years and bad years, the algorithm should take into account the couple rating year / user, in order to consider the fluctuation that could appear in the average rating of a user across the rating period (1995 - 2009).</p>
+<p><b>Algorithm term 5:</b> The average rating of each user for each year is computed and the difference between the previous Y_hat and the average user / year rating makes the fifth term.</p>
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Function that computes the number of rating for each user for each year, his averge rating across all movies he watched that year and the difference between this average rating and the rating coming from the previous step.
+
+GetTheUserYearAverageRating <- function(DF) {
+  
+  DF %>% group_by(userId, ratingYear) %>% 
+         summarize(avgUserYear = mean(rating), avgY_hat = mean(Y_hat), nUserYear = n()) %>% 
+         mutate(DiffUserYear = avgUserYear - avgY_hat) %>%
+         select(userId, ratingYear, DiffUserYear, nUserYear)
+  
+}
+
+
+# Compute for the Training Set for each user (and all movies) the average rating per year.
+  
+  UYavg <- GetTheUserYearAverageRating(TrainingSet)
+    
+  TrainingSet <- TrainingSet %>% 
+                  left_join(UYavg, by = c("userId", "ratingYear")) %>% 
+                  mutate(DiffUserYear = ifelse(!is.na(DiffUserYear), DiffUserYear, 0), nUserYear = ifelse(!is.na(nUserYear), nUserYear, 0))
+  
+  TrainingSet <- TrainingSet %>% 
+                  mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear)
+
+```
+
+<p><br/>Considering that movies have fluctuation of ratings with time, some may get lower rating with time (some don't age very well, especially special effects don't always age very well), some other may get higher rating with times (nostalgy effect). So the fluctuation of rating with time for a movie should be considered.</p>
+<p><b>Algorithm term 6:</b> The average rating of each movie for each year is computed and the difference between the previous Y_hat and the average movie / year rating makes the sixth term.</p>
+
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Function that computes the number of rating for each movie for each year, his averge rating across all users having watched it that year and the difference between this average rating and the rating coming from the previous step.
+
+GetTheMovieYearAverageRating <- function(DF) {
+  
+  DF %>% group_by(movieId, ratingYear) %>% 
+         summarize(avgMovieYear = mean(rating), avgY_hat = mean(Y_hat), nMovieYear = n()) %>% 
+         mutate(DiffMovieYear = avgMovieYear - avgY_hat) %>%
+         select(movieId, ratingYear, DiffMovieYear, nMovieYear)
+  
+}
+
+
+# Compute for the Training Set for each movie (across all users) the average rating per year.
+
+  MYavg <- GetTheMovieYearAverageRating(TrainingSet)
+  
+  TrainingSet <- TrainingSet %>% 
+                  left_join(MYavg, by = c("movieId", "ratingYear")) %>% 
+                  mutate(DiffMovieYear = ifelse(!is.na(DiffMovieYear), DiffMovieYear, 0), nMovieYear = ifelse(!is.na(nMovieYear), nMovieYear, 0))
+  
+  TrainingSet <- TrainingSet %>% 
+                  mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear + DiffMovieYear)
+
+```
+
+<p><br/>Considering that many users have a favorite period for movies (mute movies from the 20's, classics from the 50's, recent blockbusters, etc.), we can also include a term in the algorithm that takes into account the affinity of a user for a particular decade.</p>
+<p><b>Algorithm term 7:</b> The average rating of each user for each movie decade is computed and the difference between the previous Y_hat and the average user / movie decade makes the seventh term.</p>
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Function that computes the number of rating for each user across all movies realized a certain decade, his averge rating for those and the difference between this average rating and the rating coming from the previous step.
+
+GetTheUserDecadeAverageRating <- function(DF) {
+ 
+  DF %>% group_by(userId, movieDecade) %>% 
+         summarize(avgUserDecade = mean(rating), avgY_hat = mean(Y_hat), nUserDecade = n()) %>% 
+         mutate(DiffUserDecade = avgUserDecade - avgY_hat) %>%
+         select(userId, movieDecade, DiffUserDecade, nUserDecade)
+  
+}
+
+
+# Compute for the Training Set for each user the average rating given for movies of a particular decade.
+
+  DUavg <- GetTheUserDecadeAverageRating(TrainingSet)
+  
+  TrainingSet <- TrainingSet %>% 
+                  left_join(DUavg, by = c("userId", "movieDecade")) %>% 
+                  mutate(DiffUserDecade = ifelse(!is.na(DiffUserDecade), DiffUserDecade, 0), nUserDecade = ifelse(!is.na(nUserDecade), nUserDecade, 0))
+  
+  TrainingSet <- TrainingSet %>% 
+                  mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear + DiffMovieYear + DiffUserDecade)
+  
+```
+
+<h1>Step 4: Test of the resulting algorithm on the test set from set 2, measure of the RMSE</h1>
+<p>Now that we have all terms of the algorithm, we can apply them one by one to the Test set and check, for each step, the resulting RMSE.</p>
+<p>First, the term 1 (overall average rating across all movies and all users)</p>
+
+```{r, warning=FALSE, message=FALSE}
+  
+# Apply the data of the training to the Test Set.
+
+  TestSet <- ExtractMovieYearAndRatingYear(TestSet)
+  
+  TestSet <- TestSet %>% mutate(Y_hat = AvgOverall)
+  
+  Results <- data.frame(Step = "Average overall", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2)))
+  Results
+
+```
+
+<p>Secondly, the term 2 (average rating per movie):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  TestSet <- TestSet %>% 
+              left_join(Mavg, by = "movieId") %>% 
+              mutate(DiffRatingMovie = ifelse(!is.na(DiffRatingMovie), DiffRatingMovie, 0), nMovie = ifelse(!is.na(nMovie), nMovie, 0)) %>% 
+              mutate(Y_hat = AvgOverall + DiffRatingMovie)
+  
+  Results <- rbind(Results, data.frame(Step = "Average per movie", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))))
+  Results
+  
+```
+
+<p>Thirdly, the term 3 (average rating per user):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  TestSet <- TestSet %>% 
+              left_join(Uavg, by = "userId") %>% 
+              mutate(DiffRatingUser = ifelse(!is.na(DiffRatingUser), DiffRatingUser, 0), nUser = ifelse(!is.na(nUser), nUser, 0)) %>% 
+              mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser)
+  
+  Results <- rbind(Results, data.frame(Step = "Average per user", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))))
+  Results
+
+```
+
+<p>Fourthly, the term 4 (average rating per user and per genre):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  TestSet <- TestSet %>% 
+              left_join(Gavg, by = c("userId", "genres")) %>% 
+              mutate(DiffGenresUser = ifelse(!is.na(DiffGenresUser), DiffGenresUser, 0), nGenresUser = ifelse(!is.na(nGenresUser), nGenresUser, 0)) %>% 
+              mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser)
+  
+  Results <- rbind(Results, data.frame(Step = "Average per genre and per user", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))))
+  Results
+
+```
+
+<p>Surprisingly, taking into account the genre increase the RMSE. We have noticed earlier the high number of genres having a low number of movies, so the regularization will likely help. Let's keep this term and see the result after regularization.</p>
+
+<p>Fifthly, the term 5 (average rating per user and per year):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  TestSet <- TestSet %>% 
+              left_join(UYavg, by = c("userId", "ratingYear")) %>% 
+              mutate(DiffUserYear = ifelse(!is.na(DiffUserYear), DiffUserYear, 0), nUserYear = ifelse(!is.na(nUserYear), nUserYear, 0)) %>% 
+              mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear)
+  
+  Results <- rbind(Results, data.frame(Step = "Average per user per year", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))))
+  Results
+ 
+```
+
+<p>Sixthly, the term 6 (average rating per movie and per year):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  TestSet <- TestSet %>% 
+              left_join(MYavg, by = c("movieId", "ratingYear")) %>% 
+              mutate(DiffMovieYear = ifelse(!is.na(DiffMovieYear), DiffMovieYear, 0), nMovieYear = ifelse(!is.na(nMovieYear), nMovieYear, 0)) %>% 
+              mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear + DiffMovieYear)
+  
+  Results <- rbind(Results, data.frame(Step = "Average per movie per year", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))))
+  Results
+
+```
+
+<p>Seventhly, the term 7 (average rating per user and per movie decade):</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  TestSet <- TestSet %>% 
+              left_join(DUavg, by = c("userId", "movieDecade")) %>% 
+              mutate(DiffUserDecade = ifelse(!is.na(DiffUserDecade), DiffUserDecade, 0), nUserDecade = ifelse(!is.na(nUserDecade), nUserDecade, 0)) %>% 
+              mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear + DiffMovieYear+ DiffUserDecade)
+  
+Results <- rbind(Results, data.frame(Step = "Average per user per movie decade", RMSE = sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))))
+Results
+
+```
+
+<h1>Step 5: Regularization step for the different terms using the test set of step 2, measure of the resulting RMSE</h1>
+
+<p>For each of the 6 last terms of the algorithm, we need to add a regularization factor to give a different weight to users / movies / genres / years with a low number of values and with a high number of values. A regularization factor is a number added to the denominator as following:</p>
+
+<p style="text-align:center">$Y = T1 + \sum_{i=2}^{7} Ti*\frac{n_{Ti}}{n_{Ti} + k_{Ti}}$</p>
+
+<p>where Ti is the term i (i between 2 to 7, the term 1 has only 1 value and cannot be regularized), $n_{Ti}$ is the number of values for this terms and $k_{Ti}$ the regularization factor. For this purpose, for each of of the 6 last terms, we always have isolated the number of values for each line.</p>
+<p>For each of the 6 steps, we compute the optimal regularization factors, the one giving the lowest RMSE. The higher number of values we have per line for a term, the lower we expect the regularization factor to be. For example the optimal regularization factor for term 2 (average movies rating) or term 3 (average user rating) is expected to be lower than the term 5 (average user rating per year) or term 6 (average movie rating per year). This is to be taken into account to determine the range of values where the optimal value is to be searched.</p>
+<p>The optimal regularization factor of each term is computed using a loop where the RMSE is computed with the fluctuation of k. The optimal k value being the one giving the lowest RMSE.</p>
+<p>Let's start by term 2:</p>
+
+```{r, warning=FALSE, message=FALSE}  
+
+## Step of determination of regularization factors.  
+  
+FineTune <- data.frame(fact = "0", k = 0, RMSE = 0, stringsAsFactors = FALSE)
+
+# Determination of the optimal regularization for movie average rating.
+
+for(kMovie in seq(0.1, 10, 0.1)) {
+    
+    TestSet <- TestSet %>% mutate(Y_hat = AvgOverall + 
+                                    (nMovie*DiffRatingMovie)/(nMovie + kMovie))
+    
+    RMSE <- sqrt(mean((TestSet$rating - TestSet$Y_hat)^2))
+    
+    FineTune <- rbind(FineTune, data.frame(fact = "kMovie", k = kMovie, RMSE = RMSE))
+    
+  }
+
+FineTune %>% filter(fact == "kMovie") %>% 
+             ggplot(aes(k, RMSE)) + 
+             geom_point(color = "blue") + 
+             geom_point(color = "blue") + 
+             theme_bw() + 
+             labs(x = "kMovie", y = "RMSE", title = "Determination of the optimal regularization factor for movies average rating")
+
+M <- FineTune %>% filter(fact == "kMovie") %>% 
+                  summarize(min(RMSE)) %>% 
+                  filter(row_number()==1) %>% pull()
+
+kMovieOpt <- FineTune %>% filter(fact == "kMovie" & RMSE == M) %>% pull(k)
+
+SummaryOptimalk <- data.frame(Factor = "kMovie", Optimalk = kMovieOpt, RMSE = M)
+
+SummaryOptimalk
+
+```
+
+<p>Now for term 3:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Determination of the optimal regularization for user average rating.
+
+for(kUser in seq(0.5, 50, 0.5)) {
+  
+  TestSet <- TestSet %>% mutate(Y_hat = AvgOverall + 
+                                  (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                                  (nUser*DiffRatingUser)/(nUser + kUser))
+  
+  RMSE <- sqrt(mean((TestSet$rating - TestSet$Y_hat)^2))
+  
+  FineTune <- rbind(FineTune, data.frame(fact = "kUser", k = kUser, RMSE = RMSE))
+  
+}
+
+FineTune %>% filter(fact == "kUser") %>% 
+             ggplot(aes(k, RMSE)) + 
+             geom_point(color = "blue") + 
+             geom_point(color = "blue") + 
+             theme_bw() + 
+             labs(x = "kUser", y = "RMSE", title = "Determination of the optimal regularization factor for users average rating")
+
+M <- FineTune %>% filter(fact == "kUser") %>% 
+                  summarize(min(RMSE)) %>% 
+                  filter(row_number()==1) %>% pull()
+
+kUserOpt <- FineTune %>% filter(fact == "kUser" & RMSE == M) %>% pull(k)
+
+SummaryOptimalk <- rbind(SummaryOptimalk, data.frame(Factor = "kUser", Optimalk = kUserOpt, RMSE = M))
+
+SummaryOptimalk
+
+```
+
+<p>For term 4:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Determination of the optimal regularization for couple user / genre average rating.
+
+for(kGenresUser in seq(0.1, 10, 0.1)) {
+  
+  TestSet <- TestSet %>% 
+              mutate(Y_hat = AvgOverall + 
+                     (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                     (nUser*DiffRatingUser)/(nUser + kUserOpt) + 
+                     (nGenresUser*DiffGenresUser)/(nGenresUser + kGenresUser))
+  
+  RMSE <- sqrt(mean((TestSet$rating - TestSet$Y_hat)^2))
+  
+  FineTune <- rbind(FineTune, data.frame(fact = "kGenresUser", k = kGenresUser, RMSE = RMSE))
+  
+}
+
+FineTune %>% filter(fact == "kGenresUser") %>% 
+             ggplot(aes(k, RMSE)) + 
+             geom_point(color = "blue") + 
+                        theme_bw() + 
+                        labs(x = "kGenresUser", y = "RMSE", title = "Determination of the optimal regularization factor for user / genres rating")
+
+M <- FineTune %>% filter(fact == "kGenresUser") %>% 
+                  summarize(min(RMSE)) %>% filter(row_number()==1) %>% pull()
+kGenresUserOpt <- FineTune %>% filter(fact == "kGenresUser" & RMSE == M) %>% pull(k)
+
+SummaryOptimalk <- rbind(SummaryOptimalk, data.frame(Factor = "kGenresUser", Optimalk = kGenresUserOpt, RMSE = M))
+
+SummaryOptimalk
+
+```
+
+<p>We notice here that even if the genre was earlier increasing the RMSE, when adding the regularization term, it finally lower the RMSE and should be kept.</p>
+
+<p>For term 5:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Determination of the optimal regularization for couple user / rating year average rating.
+
+for(kUserYear in seq(0.1, 10, 0.1)) {
+  
+  TestSet <- TestSet %>% 
+              mutate(Y_hat = AvgOverall + 
+                     (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                     (nUser*DiffRatingUser)/(nUser + kUserOpt) + 
+                     (nGenresUser*DiffGenresUser)/(nGenresUser + kGenresUserOpt) + 
+                     (nUserYear*DiffUserYear)/(nUserYear + kUserYear))
+  
+  RMSE <- sqrt(mean((TestSet$rating - TestSet$Y_hat)^2))
+  
+  FineTune <- rbind(FineTune, data.frame(fact = "kUserYear", k = kUserYear, RMSE = RMSE))
+  
+}
+
+FineTune %>% filter(fact == "kUserYear") %>% 
+             ggplot(aes(k, RMSE)) + 
+             geom_point(color = "blue") + 
+             theme_bw() + 
+             labs(x = "kUserYear", y = "RMSE", title = "Determination of the optimal regularization factor for user / year average rating")
+
+M <- FineTune %>% filter(fact == "kUserYear") %>% 
+                  summarize(min(RMSE)) %>% filter(row_number()==1) %>% pull()
+
+kUserYearOpt <- FineTune %>% filter(fact == "kUserYear" & RMSE == M) %>% pull(k)
+
+SummaryOptimalk <- rbind(SummaryOptimalk, data.frame(Factor = "kUserYear", Optimalk = kUserYearOpt, RMSE = M))
+
+SummaryOptimalk
+
+```
+
+<p>For term 6:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Determination of the optimal regularization for couple movie / rating year average rating.
+
+for(kMovieYear in seq(0.5, 50, 0.5)) {
+  
+  TestSet <- TestSet %>% 
+              mutate(Y_hat = AvgOverall + 
+                     (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                     (nUser*DiffRatingUser)/(nUser + kUserOpt) + 
+                     (nGenresUser*DiffGenresUser)/(nGenresUser + kGenresUserOpt) + 
+                     (nUserYear*DiffUserYear)/(nUserYear + kUserYearOpt) + 
+                     (nMovieYear*DiffMovieYear)/(nMovieYear + kMovieYear))
+  
+  RMSE <- sqrt(mean((TestSet$rating - TestSet$Y_hat)^2))
+  
+  FineTune <- rbind(FineTune, data.frame(fact = "kMovieYear", k = kMovieYear, RMSE = RMSE))
+  
+}
+
+FineTune %>% filter(fact == "kMovieYear") %>% 
+             ggplot(aes(k, RMSE)) + 
+             geom_point(color = "blue") + 
+             theme_bw() + 
+             labs(x = "kMovieYear", y = "RMSE", title = "Determination of the optimal regularization factor for movie / year average rating")
+
+M <- FineTune %>% filter(fact == "kMovieYear") %>% 
+                  summarize(min(RMSE)) %>% filter(row_number()==1) %>% pull()
+
+kMovieYearOpt <- FineTune %>% filter(fact == "kMovieYear" & RMSE == M) %>% pull(k)
+
+SummaryOptimalk <- rbind(SummaryOptimalk, data.frame(Factor = "kMovieYear", Optimalk = kMovieYearOpt, RMSE = M))
+
+SummaryOptimalk
+
+```
+
+<p>And term 7:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Determination of the optimal regularization for couple user / movie decade average rating.
+
+for(kUserDecade in seq(0.1, 10, 0.1)) {
+  
+  TestSet <- TestSet %>% 
+              mutate(Y_hat = AvgOverall + 
+                     (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                     (nUser*DiffRatingUser)/(nUser + kUserOpt) + 
+                     (nGenresUser*DiffGenresUser)/(nGenresUser + kGenresUserOpt) + 
+                     (nUserYear*DiffUserYear)/(nUserYear + kUserYearOpt) + 
+                     (nMovieYear*DiffMovieYear)/(nMovieYear + kMovieYearOpt) + 
+                     (nUserDecade*DiffUserDecade)/(nUserDecade + kUserDecade))
+  
+  RMSE <- sqrt(mean((TestSet$rating - TestSet$Y_hat)^2))
+  
+  FineTune <- rbind(FineTune, data.frame(fact = "kUserDecade", k = kUserDecade, RMSE = RMSE))
+  
+}
+
+FineTune %>% filter(fact == "kUserDecade") %>% 
+             ggplot(aes(k, RMSE)) + 
+             geom_point(color = "blue") + 
+             theme_bw() + 
+             labs(x = "kUserDecade", y = "RMSE", title = "Determination of the optimal regularization factor for user / movie decade average rating")
+
+M <- FineTune %>% filter(fact == "kUserDecade") %>% 
+                  summarize(min(RMSE)) %>% filter(row_number()==1) %>% pull()
+
+kUserDecadeOpt <- FineTune %>% filter(fact == "kUserDecade" & RMSE == M) %>% pull(k)
+
+SummaryOptimalk <- rbind(SummaryOptimalk, data.frame(Factor = "kUserMovieDecade", Optimalk = kUserDecadeOpt, RMSE = M))
+
+SummaryOptimalk
+
+```
+
+<p>We now have the 6 optimal regularization factors, we can compute the final RMSE on the Test Set:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Computation of the final RMSE on the Test Set using all optimal regularization factors.
+
+TestSet <- TestSet %>% 
+            mutate(Y_hat = AvgOverall + 
+                   (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                   (nUser*DiffRatingUser)/(nUser + kUserOpt) + 
+                   (nGenresUser*DiffGenresUser)/(nGenresUser + kGenresUserOpt) + 
+                   (nMovieYear*DiffMovieYear)/(nMovieYear + kMovieYearOpt) + 
+                   (nUserYear*DiffUserYear)/(nUserYear + kUserYearOpt) + 
+                   (nUserDecade*DiffUserDecade)/(nUserDecade + kUserDecadeOpt))
+
+sqrt(mean((TestSet$Y_hat - TestSet$rating)^2))
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+# A bit of cleanup.
+
+rm(AvgOverall, kMovie, kUser, kMovieYear, kUserYear, kGenresUser, kUserDecade, M, RMSE)
+rm(Gavg, Mavg, MYavg, Uavg, UYavg, DUavg, TrainingSet, TestSet)
+
+```
+
+<h1>Step 6: Training of the algorithm with the full edx set</h1>
+
+<p>Now, we can retrain the model using the full edx data set. The same operations as before are performed for the 7 terms:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Add to the Training Set two new columns: the rating year and the movie release date.
+
+  EedxSet <- ExtractMovieYearAndRatingYear(edx)
+  
+
+# Compute for the Training Set the average rating for all movies and all users.
+  
+  AvgOverall <- GetTheBasis(EedxSet)
+   
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall)
+  
+
+# Compute for the Training Set the average rating of each movie for all users.
+  
+  Mavg <- GetTheMovieAverageRating(EedxSet)
+  
+  EedxSet <- EedxSet %>% 
+             left_join(Mavg, by = "movieId") %>% 
+             mutate(DiffRatingMovie = ifelse(!is.na(DiffRatingMovie), DiffRatingMovie, 0), nMovie = ifelse(!is.na(nMovie), nMovie, 0))
+  
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall + DiffRatingMovie)
+
+  
+# Compute for the Training Set the average rating of each user for all movies. 
+  
+  Uavg <- GetTheUserAverageRating(EedxSet)
+    
+  EedxSet <- EedxSet %>% 
+             left_join(Uavg, by = "userId") %>% 
+             mutate(DiffRatingUser = ifelse(!is.na(DiffRatingUser), DiffRatingUser, 0), nUser = ifelse(!is.na(nUser), nUser, 0))
+  
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser)
+  
+
+# Compute for the Training Set for each movie (across all users) the average rating per year.
+
+  Gavg <- GetTheGenreUserAverageRating(EedxSet)
+  
+  EedxSet <- EedxSet %>% 
+             left_join(Gavg, by = c("userId", "genres")) %>% 
+             mutate(DiffGenresUser = ifelse(!is.na(DiffGenresUser), DiffGenresUser, 0), nGenresUser = ifelse(!is.na(nGenresUser), nGenresUser, 0)) %>%
+             mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser)
+  
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser)
+  
+  
+# Compute for the Training Set for each user (and all movies) the average rating per year.
+  
+  UYavg <- GetTheUserYearAverageRating(EedxSet)
+    
+  EedxSet <- EedxSet %>% 
+             left_join(UYavg, by = c("userId", "ratingYear")) %>% 
+             mutate(DiffUserYear = ifelse(!is.na(DiffUserYear), DiffUserYear, 0), nUserYear = ifelse(!is.na(nUserYear), nUserYear, 0))
+  
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear)
+
+
+# Compute for the Training Set for each movie (across all users) the average rating per year.
+
+  MYavg <- GetTheMovieYearAverageRating(EedxSet)
+  
+  EedxSet <- EedxSet %>% 
+             left_join(MYavg, by = c("movieId", "ratingYear")) %>% 
+             mutate(DiffMovieYear = ifelse(!is.na(DiffMovieYear), DiffMovieYear, 0), nMovieYear = ifelse(!is.na(nMovieYear), nMovieYear, 0))
+  
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear + DiffMovieYear)
+
+
+# Compute for the Training Set for each user the average rating given for movies of a particular decade.
+
+  DUavg <- GetTheUserDecadeAverageRating(EedxSet)
+  
+  EedxSet <- EedxSet %>% 
+             left_join(DUavg, by = c("userId", "movieDecade")) %>% 
+             mutate(DiffUserDecade = ifelse(!is.na(DiffUserDecade), DiffUserDecade, 0), nUserDecade = ifelse(!is.na(nUserDecade), nUserDecade, 0))
+  
+  EedxSet <- EedxSet %>% 
+             mutate(Y_hat = AvgOverall + DiffRatingMovie + DiffRatingUser + DiffGenresUser + DiffUserYear + DiffMovieYear + DiffUserDecade)
+
+```
+
+<p>We now have a complete set that we can use on the final verification set.</p>
+<h1>Step 7: Application of the algorithm from step 6 and regularization factors of step 5 on the validation set provided by edx.</h1>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Apply the algorithm on the validation set.
+
+  validation <- ExtractMovieYearAndRatingYear(validation)
+  
+  validation <- validation %>% 
+                left_join(Mavg, by = "movieId") %>% 
+                mutate(DiffRatingMovie = ifelse(!is.na(DiffRatingMovie), DiffRatingMovie, 0), nMovie = ifelse(!is.na(nMovie), nMovie, 0))
+  
+  validation <- validation %>% 
+                left_join(Uavg, by = "userId") %>% 
+                mutate(DiffRatingUser = ifelse(!is.na(DiffRatingUser), DiffRatingUser, 0), nUser = ifelse(!is.na(nUser), nUser, 0))
+  
+  validation <- validation %>% 
+                left_join(Gavg, by = c("userId", "genres")) %>% 
+                mutate(DiffGenresUser = ifelse(!is.na(DiffGenresUser), DiffGenresUser, 0), nGenresUser = ifelse(!is.na(nGenresUser), nGenresUser, 0))
+  
+  validation <- validation %>% 
+                left_join(UYavg, by = c("userId", "ratingYear")) %>% 
+                mutate(DiffUserYear = ifelse(!is.na(DiffUserYear), DiffUserYear, 0), nUserYear = ifelse(!is.na(nUserYear), nUserYear, 0))
+  
+  validation <- validation %>% 
+                left_join(MYavg, by = c("movieId", "ratingYear")) %>% 
+                mutate(DiffMovieYear = ifelse(!is.na(DiffMovieYear), DiffMovieYear, 0), nMovieYear = ifelse(!is.na(nMovieYear), nMovieYear, 0))
+
+  validation <- validation %>% 
+                left_join(DUavg, by = c("userId", "movieDecade")) %>% 
+                mutate(DiffUserDecade = ifelse(!is.na(DiffUserDecade), DiffUserDecade, 0), nUserDecade = ifelse(!is.na(nUserDecade), nUserDecade, 0))
+
+  validation <- validation %>% 
+                mutate(Y_hat = AvgOverall + 
+                                (nMovie*DiffRatingMovie)/(nMovie + kMovieOpt) + 
+                                (nUser*DiffRatingUser)/(nUser + kUserOpt) + 
+                                (nGenresUser*DiffGenresUser)/(nGenresUser + kGenresUserOpt) + 
+                                (nMovieYear*DiffMovieYear)/(nMovieYear + kMovieYearOpt) + 
+                                (nUserYear*DiffUserYear)/(nUserYear + kUserYearOpt) + 
+                                (nUserDecade*DiffUserDecade)/(nUserDecade + kUserDecadeOpt))
+  
+```
+
+<p>To be sure, let's check if all entries are there and have an estimated rating:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+# Apply the algorithm on the validation set.
+
+sum(!is.na(validation$rating))
+
+sum(!is.na(validation$Y_hat))
+
+```
+
+<p>All entries are there and have a rating, so the algorithm is reliable and provide an estimated rating for each entry.</p>
+
+<p>Now, the moment of truth, the RMSE:</p>
+
+```{r, warning=FALSE, message=FALSE}
+
+  sqrt(mean((validation$Y_hat - validation$rating)^2))
+  
+```
+
+<p>Mission complete!</p>
+
+<h1>Step 8: Conclusion and perspectives</h1>
+
+<p>The RMSE we obtain here is somwhat acceptable (still far from the matrix factorization I agree) but I am working now ideas of improvements:</p>
+
+<p><ul><li>The genres are currently not enough valuable. Each genre combination could be divided by individual genres (e.g. divide Action|Drama in Action + Drama) and design an algorithm that would compute a rating per user and per individual genre. This would increase the number of movies per couple user / genre and likely make the genre more valuable;</li>
+<li>Other terms could be added based upon clusters of users or clusters of movies. Clusters would group users and movies with similar ratings and the same method applied before could be applied on those to get new algorithm terms;</li>  
+<li>Other algorithm terms could be developped based upon correlations between users and movies, this would lead closer to Matrix facorization methods.</li></ul>
+</p>
+
+<p>Thank you for reading!</p>
+
+</body></html>
